@@ -220,6 +220,8 @@ func currentScreenSetup() (KScreenDoctorResult, error) {
 		return KScreenDoctorResult{}, fmt.Errorf("failed to run kscreen-doctor: %w", err)
 	}
 
+	wg.Wait()
+
 	if decodeError != nil {
 		return KScreenDoctorResult{}, fmt.Errorf("failed to decode kscreen-doctor result: %w", decodeError)
 	}
