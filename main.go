@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"os"
 	"os/exec"
 	"slices"
 	"sync"
+
+	"github.com/alecthomas/kong"
 )
 
 type Output struct {
@@ -53,10 +55,18 @@ type Screen struct {
 	Scale       float64  `json:"scale"`
 }
 
-func main() {
+type SaveProfileCmd struct {
+	Name string `arg:"1" help:"The name of the profile."`
+}
+
+type CLI struct {
+	SaveProfile SaveProfileCmd `cmd:"1" help:"Save the current profile to a file."`
+}
+
+func (cmd SaveProfileCmd) Run() error {
 	result, err := currentScreenSetup()
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("failed to load current screen setup: %w", err)
 	}
 
 	// Sort by priority.
@@ -84,13 +94,21 @@ func main() {
 		}
 
 		if screen.RefreshRate == 0 {
-			log.Fatalf("failed to determine refreshrate for output %s\n", output.Name)
+			return fmt.Errorf("failed to determine refreshrate for output %s", output.Name)
 		}
 
 		profile.Screens = append(profile.Screens, screen)
 	}
 
-	fmt.Println(profile)
+	b, err := json.Marshal(profile)
+	if err != nil {
+		return fmt.Errorf("failed to serialize profile: %w", err)
+	}
+	if err := os.WriteFile(cmd.Name, b, 0644); err != nil {
+		return fmt.Errorf("failed to write profile: %w", err)
+	}
+
+	return nil
 }
 
 func currentScreenSetup() (KScreenDoctorResult, error) {
@@ -120,4 +138,12 @@ func currentScreenSetup() (KScreenDoctorResult, error) {
 	}
 
 	return result, nil
+}
+
+func main() {
+	var cli CLI
+	ctx := kong.Parse(&cli, kong.Name("kdedisplayprofile"))
+	ctx.FatalIfErrorf(ctx.Error)
+
+	ctx.FatalIfErrorf(ctx.Run())
 }
