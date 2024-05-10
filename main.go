@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"slices"
 	"sync"
 
 	"github.com/alecthomas/kong"
+	"github.com/samber/lo"
 )
 
 type Output struct {
@@ -59,8 +61,13 @@ type SaveProfileCmd struct {
 	Name string `arg:"1" help:"The name of the profile."`
 }
 
+type LoadProfileCmd struct {
+	Name string `arg:"1" help:"The name of the profile."`
+}
+
 type CLI struct {
-	SaveProfile SaveProfileCmd `cmd:"1" help:"Save the current profile to a file."`
+	Save SaveProfileCmd `cmd:"1" help:"Save the current profile to a file."`
+	Load LoadProfileCmd `cmd:"1" help:"Load the profile from a file."`
 }
 
 func (cmd SaveProfileCmd) Run() error {
@@ -109,6 +116,86 @@ func (cmd SaveProfileCmd) Run() error {
 	}
 
 	return nil
+}
+
+func (cmd LoadProfileCmd) Run() error {
+	b, err := os.ReadFile(cmd.Name)
+	if err != nil {
+		return fmt.Errorf("failed to read profile: %w", err)
+	}
+	var profile Profile
+	if err := json.Unmarshal(b, &profile); err != nil {
+		return fmt.Errorf("failed to deserialize profile: %w", err)
+	}
+
+	currentScreen, err := currentScreenSetup()
+	if err != nil {
+		return fmt.Errorf("failed to load current screen setup: %w", err)
+	}
+
+	outputByName := lo.Associate(currentScreen.Outputs, func(output Output) (string, Output) {
+		return output.Name, output
+	})
+
+	type targetOutputProperties struct {
+		name     string
+		mode     string
+		position string
+		scale    string
+	}
+	var targetOutputs []targetOutputProperties
+	var targetOutputNames = make(map[string]bool)
+	for _, desiredScreen := range profile.Screens {
+		var targetOutput targetOutputProperties
+		targetOutput.name = desiredScreen.Name
+		targetOutput.scale = fmt.Sprintf("%f", desiredScreen.Scale)
+		targetOutput.position = fmt.Sprintf("%d,%d", desiredScreen.Position.X, desiredScreen.Position.Y)
+
+		output, exists := outputByName[desiredScreen.Name]
+		if !exists {
+			return fmt.Errorf("profile references missing output %s", desiredScreen.Name)
+		}
+
+		potentialModes := lo.Filter(output.Modes, func(mode Mode, _ int) bool {
+			return mode.Size == desiredScreen.Size
+		})
+		if len(potentialModes) == 0 {
+			return fmt.Errorf("output %s doesn't contain a matching mode", desiredScreen.Name)
+		}
+		// Pick the mode with the next best refreshrate
+		slices.SortFunc(potentialModes, func(a, b Mode) int {
+			diffA := math.Abs(desiredScreen.RefreshRate - a.RefreshRate)
+			diffB := math.Abs(desiredScreen.RefreshRate - b.RefreshRate)
+
+			return int(diffA - diffB)
+		})
+		targetOutput.mode = potentialModes[0].Name
+
+		targetOutputs = append(targetOutputs, targetOutput)
+		targetOutputNames[targetOutput.name] = true
+	}
+
+	var disabledOutputs []string
+	for outputName := range outputByName {
+		if !targetOutputNames[outputName] {
+			disabledOutputs = append(disabledOutputs, outputName)
+		}
+	}
+
+	var args []string
+	for _, outputName := range disabledOutputs {
+		args = append(args, fmt.Sprintf("output.%s.disable", outputName))
+	}
+	for _, output := range targetOutputs {
+		args = append(args,
+			fmt.Sprintf("output.%s.enable", output.name),
+			fmt.Sprintf("output.%s.mode.%s", output.name, output.mode),
+			fmt.Sprintf("output.%s.position.%s", output.name, output.position),
+			fmt.Sprintf("output.%s.scale.%s", output.name, output.scale),
+		)
+	}
+
+	return exec.Command("kscreen-doctor", args...).Run()
 }
 
 func currentScreenSetup() (KScreenDoctorResult, error) {
